@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Real Time Chat Application</title>
+    <!-- Bootstrap CSS for basic styling -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/5.3.2/css/bootstrap.min.css">
+    <!-- SockJS and Stomp (CDN builds that expose global `SockJS` and `Stomp`) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.5.1/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <style>
+        /* Custom chat styles */
+        #chat {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 6px;
+        }
+        .message {
+            margin-bottom: 8px;
+            padding: 8px 12px;
+            border-radius: 12px;
+            display: inline-block;
+            max-width: 80%;
+        }
+        .message .sender {
+            font-weight: 600;
+            margin-bottom: 4px;
+            display: block;
+        }
+        .message.incoming { background: #ffffff; border: 1px solid #e9ecef; }
+        .message.outgoing { background: #cfe9ff; align-self: flex-end; }
+        /* layout tweaks */
+        .chat-row { display:flex; flex-direction:column; }
+        .chat-controls { gap:8px; display:flex; }
+        @media (max-width: 576px) {
+            .chat-controls { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+     <div class="container mt-4">
+        <div id="chat" class="border rounded p-3 mb-3" style="height: 300px; overflow-y: scroll;">
+         <!-- Chat messages will be displayed here -->
+
+
+       </div>
+        <div class="mb-2">
+          Connection: <span id="connStatus" class="badge bg-secondary">Connecting</span>
+        </div>
+        <div class="input-group mb-3 chat-controls">
+          <div class="d-flex flex-column me-2">
+            <label for="senderInput" class="form-label visually-hidden">Your name</label>
+            <input id="senderInput" type="text" placeholder="Your name" class="form-control" aria-label="Your name">
+          </div>
+          <div class="flex-fill me-2">
+            <label for="messageInput" class="form-label visually-hidden">Message</label>
+            <input id="messageInput" type="text" placeholder="Type a message" class="form-control" aria-label="Type a message">
+          </div>
+          <div>
+            <button id="sendButton" class="btn btn-primary">Send</button>
+          </div>
+        </div>
+
+     </div>
+
+    <script>
+        // stompClient is stored here once connected
+        let stompClient = null;
+        let socket = null;
+        let messageQueue = [];
+        let reconnectTimer = null;
+        const RECONNECT_DELAY = 3000;
+
+        function updateStatus(text, cls = 'bg-secondary'){
+            const el = document.getElementById('connStatus');
+            el.textContent = text;
+            el.className = 'badge ' + cls;
+        }
+
+        function connect(){
+            console.log('Attempting to connect to STOMP');
+            updateStatus('Connecting', 'bg-secondary');
+            socket = new SockJS('/chat');
+            stompClient = Stomp.over(socket);
+
+            // connect: success callback and error callback
+            stompClient.connect({}, function(frame){
+                console.log('STOMP connected:', frame);
+                updateStatus('Connected', 'bg-success');
+                // send queued messages
+                while(messageQueue.length){
+                    const m = messageQueue.shift();
+                    try { stompClient.send('/app/send/message', {}, JSON.stringify(m)); }
+                    catch(e){ console.error('Failed to send queued message', e); }
+                }
+                // subscribe
+                stompClient.subscribe('/topic/messages', function(message){
+                    try {
+                        const body = JSON.parse(message.body);
+                        showMessage(body);
+                    } catch(e){ console.error('Failed to parse message body', e); }
+                });
+            }, function(error){
+                console.error('STOMP connection error', error);
+                updateStatus('Disconnected', 'bg-danger');
+                scheduleReconnect();
+            });
+
+            // also watch socket close
+            socket.onclose = function(e){
+                console.warn('SockJS socket closed', e);
+                updateStatus('Disconnected', 'bg-danger');
+                scheduleReconnect();
+            };
+        }
+
+        function scheduleReconnect(){
+            if (reconnectTimer) return;
+            reconnectTimer = setTimeout(function(){
+                reconnectTimer = null;
+                console.log('Reconnecting...');
+                connect();
+            }, RECONNECT_DELAY);
+        }
+
+        function showMessage(message){
+            const chat = document.getElementById('chat');
+            const localSender = document.getElementById('senderInput').value || 'Anonymous';
+            const messageWrapper = document.createElement('div');
+            // determine if this message is outgoing (from this client)
+            const isOutgoing = message.sender === localSender;
+            messageWrapper.className = 'message ' + (isOutgoing ? 'outgoing' : 'incoming');
+
+            const senderEl = document.createElement('span');
+            senderEl.className = 'sender';
+            senderEl.textContent = message.sender;
+
+            const contentEl = document.createElement('span');
+            contentEl.className = 'content';
+            contentEl.textContent = message.content;
+
+            messageWrapper.appendChild(senderEl);
+            messageWrapper.appendChild(contentEl);
+            chat.appendChild(messageWrapper);
+            // scroll to bottom
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function renderPendingMessage(message){
+            const chat = document.getElementById('chat');
+            const wrapper = document.createElement('div');
+            wrapper.className = 'message outgoing';
+            wrapper.style.opacity = '0.6';
+            const senderEl = document.createElement('span'); senderEl.className='sender'; senderEl.textContent = message.sender;
+            const contentEl = document.createElement('span'); contentEl.textContent = message.content;
+            wrapper.appendChild(senderEl); wrapper.appendChild(contentEl);
+            chat.appendChild(wrapper);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function sendMessage(){
+            const sender = document.getElementById('senderInput').value || 'Anonymous';
+            const content = document.getElementById('messageInput').value;
+            if (!content || !content.trim()) return; // don't send empty messages
+            const message = { sender: sender, content: content };
+
+            if (stompClient && stompClient.connected) {
+                try {
+                    stompClient.send('/app/send/message', {}, JSON.stringify(message));
+                    // optimistic UI: show immediately
+                    showMessage(message);
+                    document.getElementById('messageInput').value = '';
+                } catch(e){
+                    console.error('Send failed, queueing message', e);
+                    messageQueue.push(message);
+                    renderPendingMessage(message);
+                }
+            } else {
+                console.warn('STOMP client not connected, queueing message');
+                messageQueue.push(message);
+                renderPendingMessage(message);
+                // try to connect if not already trying
+                if (!reconnectTimer) scheduleReconnect();
+            }
+        }
+
+        // Initialize on DOM ready
+        document.addEventListener('DOMContentLoaded', function() {
+            connect();
+            document.getElementById('sendButton').addEventListener('click', sendMessage);
+            // allow Enter to send message
+            document.getElementById('messageInput').addEventListener('keydown', function(e){
+                if (e.key === 'Enter') sendMessage();
+            });
+        });
+    </script>
+  </body>
+</html>
